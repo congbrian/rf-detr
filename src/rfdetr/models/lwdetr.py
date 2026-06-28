@@ -47,6 +47,7 @@ from rfdetr.models.matcher import build_matcher
 from rfdetr.models.math import MLP
 from rfdetr.models.postprocess import PostProcess
 from rfdetr.models.transformer import build_transformer
+from rfdetr.utilities.hw import coerce_hw_input
 from rfdetr.utilities.logger import get_logger
 from rfdetr.utilities.tensors import NestedTensor, nested_tensor_from_tensor_list
 
@@ -781,7 +782,11 @@ def build_model(args: "BuilderArgs"):
         target_shape=(
             args.shape
             if hasattr(args, "shape")
-            else ((args.resolution, args.resolution) if hasattr(args, "resolution") else (640, 640))
+            else (
+                coerce_hw_input(args.resolution, field="resolution")
+                if hasattr(args, "resolution")
+                else (640, 640)
+            )
         ),
         rms_norm=args.rms_norm,
         backbone_lora=args.backbone_lora,

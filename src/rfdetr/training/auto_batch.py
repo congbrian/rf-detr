@@ -324,22 +324,23 @@ def resolve_auto_batch_config(
     if not torch.cuda.is_available() or device.type != "cuda":
         raise RuntimeError("batch_size='auto' requires a CUDA device for probing in v1.")
 
-    # Use max multi-scale resolution when multi_scale is True so probe reflects worst-case.
+    # Auto-batch probing still builds square tensors; use the larger Hw side as a memory upper bound.
     multi_scale = getattr(train_config, "multi_scale", False)
     do_random_resize = getattr(train_config, "do_random_resize_via_padding", False)
     if multi_scale and not do_random_resize:
         expanded_scales = getattr(train_config, "expanded_scales", True)
         patch_size = getattr(model_config, "patch_size", 14)
         num_windows = getattr(model_config, "num_windows", 4)
+        base_side = max(model_config.resolution)
         scales = compute_multi_scale_scales(
-            model_config.resolution,
+            base_side,
             expanded_scales,
             patch_size,
             num_windows,
         )
-        probe_resolution = max(scales) if scales else model_config.resolution
+        probe_resolution = max(scales) if scales else base_side
     else:
-        probe_resolution = model_config.resolution
+        probe_resolution = max(model_config.resolution)
 
     max_targets_per_image = getattr(train_config, "auto_batch_max_targets_per_image", 100)
 

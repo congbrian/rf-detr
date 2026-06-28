@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Protocol, runtime_checkable
 
+from rfdetr.utilities.hw import Hw
+
 
 @runtime_checkable
 class BuilderArgs(Protocol):
@@ -59,10 +61,10 @@ class BuilderArgs(Protocol):
     num_classes: int
     pretrain_weights: Optional[str]
     device: str
-    resolution: int
+    resolution: Hw
     group_detr: int
     gradient_checkpointing: bool
-    positional_encoding_size: int
+    positional_encoding_size: Hw
     ia_bce_loss: bool
     cls_loss_coef: float
     segmentation_head: bool

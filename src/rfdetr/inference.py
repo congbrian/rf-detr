@@ -16,6 +16,7 @@ import torch
 from rfdetr.config import TrainConfig
 from rfdetr.models import PostProcess, build_model
 from rfdetr.models.weights import apply_lora, load_pretrain_weights
+from rfdetr.utilities.hw import Hw
 
 if TYPE_CHECKING:
     from rfdetr.config import ModelConfig
@@ -31,7 +32,7 @@ class ModelContext:
         model: The underlying ``nn.Module`` (LWDETR instance).
         postprocess: PostProcess instance for converting raw outputs to boxes.
         device: Device the model lives on.
-        resolution: Input resolution (square side length in pixels).
+        resolution: Input ``(height, width)`` in pixels.
         args: Namespace produced by :func:`build_namespace`.
         class_names: Optional list of class name strings loaded from checkpoint.
     """
@@ -41,7 +42,7 @@ class ModelContext:
         model: torch.nn.Module,
         postprocess: PostProcess,
         device: torch.device,
-        resolution: int,
+        resolution: Hw,
         args: Any,
         class_names: Optional[List[str]] = None,
     ) -> None:

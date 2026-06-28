@@ -522,39 +522,44 @@ class TestSyncPEWithResolutionAtConstruction:
     @pytest.mark.parametrize(
         "config_cls, new_resolution, expected_pe",
         [
-            pytest.param(RFDETRLargeConfig, 640, 640 // 16, id="large_640"),
-            pytest.param(RFDETRLargeConfig, 576, 576 // 16, id="large_576"),
-            pytest.param(RFDETRSmallConfig, 640, 640 // 16, id="small_640"),
-            pytest.param(RFDETRMediumConfig, 640, 640 // 16, id="medium_640"),
-            pytest.param(RFDETRNanoConfig, 416, 416 // 16, id="nano_416"),
-            pytest.param(RFDETRSegNanoConfig, 360, 360 // 12, id="seg_nano_360"),
-            pytest.param(RFDETRSegSmallConfig, 480, 480 // 12, id="seg_small_480"),
-            pytest.param(RFDETRSegMediumConfig, 480, 480 // 12, id="seg_medium_480"),
-            pytest.param(RFDETRSegLargeConfig, 576, 576 // 12, id="seg_large_576"),
-            pytest.param(RFDETRSegXLargeConfig, 576, 576 // 12, id="seg_xlarge_576"),
-            pytest.param(RFDETRSeg2XLargeConfig, 720, 720 // 12, id="seg_2xlarge_720"),
+            pytest.param(RFDETRLargeConfig, 640, (640 // 16, 640 // 16), id="large_640"),
+            pytest.param(RFDETRLargeConfig, 576, (576 // 16, 576 // 16), id="large_576"),
+            pytest.param(RFDETRSmallConfig, 640, (640 // 16, 640 // 16), id="small_640"),
+            pytest.param(RFDETRMediumConfig, 640, (640 // 16, 640 // 16), id="medium_640"),
+            pytest.param(RFDETRNanoConfig, 416, (416 // 16, 416 // 16), id="nano_416"),
+            pytest.param(RFDETRSegNanoConfig, 360, (360 // 12, 360 // 12), id="seg_nano_360"),
+            pytest.param(RFDETRSegSmallConfig, 480, (480 // 12, 480 // 12), id="seg_small_480"),
+            pytest.param(RFDETRSegMediumConfig, 480, (480 // 12, 480 // 12), id="seg_medium_480"),
+            pytest.param(RFDETRSegLargeConfig, 576, (576 // 12, 576 // 12), id="seg_large_576"),
+            pytest.param(RFDETRSegXLargeConfig, 576, (576 // 12, 576 // 12), id="seg_xlarge_576"),
+            pytest.param(RFDETRSeg2XLargeConfig, 720, (720 // 12, 720 // 12), id="seg_2xlarge_720"),
         ],
     )
     def test_positional_encoding_size_updated_for_formula_derived_configs(
         self,
         config_cls: type,
         new_resolution: int,
-        expected_pe: int,
+        expected_pe: tuple[int, int],
     ) -> None:
         """PE is auto-derived from the custom resolution for formula-derived model configs."""
         cfg = config_cls(resolution=new_resolution, pretrain_weights=None)
         assert cfg.positional_encoding_size == expected_pe
 
+    def test_rectangular_resolution_updates_pe(self) -> None:
+        cfg = RFDETRLargeConfig(resolution=(720, 960), pretrain_weights=None)
+        assert cfg.resolution == (720, 960)
+        assert cfg.positional_encoding_size == (45, 60)
+
     def test_explicit_positional_encoding_size_is_not_overridden(self) -> None:
         """When positional_encoding_size is explicitly provided, the validator must not override it."""
         cfg = RFDETRLargeConfig(resolution=640, positional_encoding_size=50, pretrain_weights=None)
-        assert cfg.positional_encoding_size == 50
+        assert cfg.positional_encoding_size == (50, 50)
 
     def test_default_resolution_preserves_default_pe(self) -> None:
         """Constructing with default resolution (no explicit resolution) must not change PE."""
         cfg = RFDETRLargeConfig(pretrain_weights=None)
-        assert cfg.resolution == 704
-        assert cfg.positional_encoding_size == 44  # 704 // 16
+        assert cfg.resolution == (704, 704)
+        assert cfg.positional_encoding_size == (44, 44)  # 704 // 16
 
 
 class TestDetectDevice:

@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, TypeAlias, Union
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticUndefined
+
+from rfdetr.utilities.hw import Hw, coerce_hw_input, pe_from_resolution, pe_tracks_resolution
 
 EncoderName: TypeAlias = Literal["dinov2_windowed_small", "dinov2_windowed_base", "dinov2_registers_windowed_small"]
 PathLikeStr: TypeAlias = str | Path
@@ -125,12 +127,12 @@ class ModelConfig(BaseConfig):
     pretrain_weights: Optional[PathLikeStr] = None
     # torch.device values are accepted at validation time and normalized to string.
     device: str = DEVICE
-    resolution: int
+    resolution: Hw
     group_detr: int = 13
     gradient_checkpointing: bool = False
     compile: bool = False
     fused_optimizer: bool = True
-    positional_encoding_size: int
+    positional_encoding_size: Hw
     ia_bce_loss: bool = True
     cls_loss_coef: float = 1.0
     segmentation_head: bool = False
@@ -176,39 +178,47 @@ class ModelConfig(BaseConfig):
             )
         return self
 
+    @field_validator("resolution", "positional_encoding_size", mode="before")
+    @classmethod
+    def _coerce_hw_input(cls, value: object, info: ValidationInfo) -> object:
+        """Coerce ``resolution`` / ``positional_encoding_size`` input to :data:`Hw`.
+
+        Args:
+            value: Square int or ``(height, width)`` pair from the caller.
+            info: Pydantic validation context (provides ``field_name`` for errors).
+
+        Returns:
+            Canonical :data:`Hw` from :func:`~rfdetr.utilities.hw.coerce_hw_input`.
+        """
+        if info.field_name is None:
+            return value
+        return coerce_hw_input(value, field=info.field_name)
+
     @model_validator(mode="after")
     def _sync_pe_with_resolution(self) -> "ModelConfig":
-        """Auto-update positional_encoding_size when resolution is explicitly provided.
+        """Auto-update ``positional_encoding_size`` when ``resolution`` is overridden at construction.
 
-        When a user provides a custom ``resolution`` at construction time (e.g., ``RFDETRLarge(resolution=640)``),
-        ``positional_encoding_size`` is updated proportionally, provided the class-default PE is formula-derived
-        (``default_pe == default_resolution // patch_size``).
+        Recomputes PE via :func:`~rfdetr.utilities.hw.pe_from_resolution` only when the variant's factory PE still
+        matches its factory ``resolution`` per :func:`~rfdetr.utilities.hw.pe_tracks_resolution` (formula-derived
+        configs). Variants with checkpoint-specific PE grids (e.g. ``RFDETRBaseConfig`` ``(37, 37)``) are left
+        unchanged even when ``resolution`` is passed explicitly.
 
-        Configs with a pretrained-specific PE (e.g., ``RFDETRBaseConfig`` with ``positional_encoding_size=37`` for
-        DINOv2's native 518 px grid, while ``resolution=560``) are left unchanged.
+        Returns:
+            ``self``, with ``positional_encoding_size`` updated when applicable.
         """
-        if "resolution" not in self.model_fields_set or "positional_encoding_size" in self.model_fields_set:
+        if "positional_encoding_size" in self.model_fields_set:
+            return self
+        if "resolution" not in self.model_fields_set:
             return self
 
         cls = type(self)
         default_resolution = cls.model_fields["resolution"].default
         default_pe = cls.model_fields["positional_encoding_size"].default
-        default_patch_size = cls.model_fields["patch_size"].default
-
-        # Skip when any relevant default is not a concrete integer (abstract base
-        # class fields have no defaults; required fields use PydanticUndefined,
-        # not int).
-        if (
-            not isinstance(default_resolution, int)
-            or not isinstance(default_pe, int)
-            or not isinstance(default_patch_size, int)
-        ):
+        if not isinstance(default_resolution, tuple) or not isinstance(default_pe, tuple):
             return self
 
-        # Only update PE when the class default is formula-derived from the class
-        # default resolution and patch size.
-        if default_pe == default_resolution // default_patch_size:
-            self.positional_encoding_size = self.resolution // self.patch_size
+        if pe_tracks_resolution(default_pe, default_resolution, self.patch_size):
+            self.positional_encoding_size = pe_from_resolution(self.resolution, self.patch_size)
 
         return self
 
@@ -432,8 +442,8 @@ class RFDETRBaseConfig(ModelConfig):
     projector_scale: List[Literal["P3", "P4", "P5"]] = ["P4"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-base.pth"
-    resolution: int = 560
-    positional_encoding_size: int = 37
+    resolution: Hw = (560, 560)
+    positional_encoding_size: Hw = (37, 37)
 
 
 class RFDETRLargeDeprecatedConfig(RFDETRBaseConfig):
@@ -455,8 +465,8 @@ class RFDETRNanoConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 2
     patch_size: int = 16
-    resolution: int = 384
-    positional_encoding_size: int = 24
+    resolution: Hw = (384, 384)
+    positional_encoding_size: Hw = (24, 24)
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-nano.pth"
 
 
@@ -467,8 +477,8 @@ class RFDETRSmallConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 3
     patch_size: int = 16
-    resolution: int = 512
-    positional_encoding_size: int = 32
+    resolution: Hw = (512, 512)
+    positional_encoding_size: Hw = (32, 32)
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-small.pth"
 
 
@@ -479,8 +489,8 @@ class RFDETRMediumConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 4
     patch_size: int = 16
-    resolution: int = 576
-    positional_encoding_size: int = 36
+    resolution: Hw = (576, 576)
+    positional_encoding_size: Hw = (36, 36)
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-medium.pth"
 
 
@@ -497,9 +507,9 @@ class RFDETRLargeConfig(ModelConfig):
     projector_scale: List[Literal["P4",]] = ["P4"]
     out_feature_indexes: List[int] = [3, 6, 9, 12]
     num_classes: int = 90
-    positional_encoding_size: int = 704 // 16
+    positional_encoding_size: Hw = (704 // 16, 704 // 16)
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-large-2026.pth"
-    resolution: int = 704
+    resolution: Hw = (704, 704)
     # Explicit so populate_args and _build_args_from_configs agree.
     # ModelConfig does not define these fields; without them the legacy path
     # picks up populate_args defaults (num_select=100) while the PTL path falls
@@ -514,8 +524,8 @@ class RFDETRSegPreviewConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 4
     patch_size: int = 12
-    resolution: int = 432
-    positional_encoding_size: int = 36
+    resolution: Hw = (432, 432)
+    positional_encoding_size: Hw = (36, 36)
     num_queries: int = 200
     num_select: int = 200
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-preview.pt"
@@ -528,8 +538,8 @@ class RFDETRSegNanoConfig(RFDETRBaseConfig):
     num_windows: int = 1
     dec_layers: int = 4
     patch_size: int = 12
-    resolution: int = 312
-    positional_encoding_size: int = 312 // 12
+    resolution: Hw = (312, 312)
+    positional_encoding_size: Hw = (312 // 12, 312 // 12)
     num_queries: int = 100
     num_select: int = 100
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-nano.pt"
@@ -542,8 +552,8 @@ class RFDETRSegSmallConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 4
     patch_size: int = 12
-    resolution: int = 384
-    positional_encoding_size: int = 384 // 12
+    resolution: Hw = (384, 384)
+    positional_encoding_size: Hw = (384 // 12, 384 // 12)
     num_queries: int = 100
     num_select: int = 100
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-small.pt"
@@ -556,8 +566,8 @@ class RFDETRSegMediumConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 5
     patch_size: int = 12
-    resolution: int = 432
-    positional_encoding_size: int = 432 // 12
+    resolution: Hw = (432, 432)
+    positional_encoding_size: Hw = (432 // 12, 432 // 12)
     num_queries: int = 200
     num_select: int = 200
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-medium.pt"
@@ -570,8 +580,8 @@ class RFDETRSegLargeConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 5
     patch_size: int = 12
-    resolution: int = 504
-    positional_encoding_size: int = 504 // 12
+    resolution: Hw = (504, 504)
+    positional_encoding_size: Hw = (504 // 12, 504 // 12)
     num_queries: int = 200
     num_select: int = 200
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-large.pt"
@@ -584,8 +594,8 @@ class RFDETRSegXLargeConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 6
     patch_size: int = 12
-    resolution: int = 624
-    positional_encoding_size: int = 624 // 12
+    resolution: Hw = (624, 624)
+    positional_encoding_size: Hw = (624 // 12, 624 // 12)
     num_queries: int = 300
     num_select: int = 300
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-xlarge.pt"
@@ -598,8 +608,8 @@ class RFDETRSeg2XLargeConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 6
     patch_size: int = 12
-    resolution: int = 768
-    positional_encoding_size: int = 768 // 12
+    resolution: Hw = (768, 768)
+    positional_encoding_size: Hw = (768 // 12, 768 // 12)
     num_queries: int = 300
     num_select: int = 300
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-seg-xxlarge.pt"
@@ -620,8 +630,8 @@ class RFDETRKeypointPreviewConfig(RFDETRBaseConfig):
     num_windows: int = 2
     dec_layers: int = 4
     patch_size: int = 12
-    resolution: int = 576
-    positional_encoding_size: int = 576 // 12
+    resolution: Hw = (576, 576)
+    positional_encoding_size: Hw = (576 // 12, 576 // 12)
     num_queries: int = 100
     num_select: int = 100
     pretrain_weights: Optional[PathLikeStr] = "rf-detr-keypoint-preview-xlarge.pth"

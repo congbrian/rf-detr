@@ -7,25 +7,36 @@
 
 import pytest
 
-from rfdetr.utilities.hw import normalize_hw, pe_from_resolution, pe_tracks_resolution
+from rfdetr.utilities.hw import (
+    coerce_hw_input,
+    expand_square_hw,
+    parse_hw_pair,
+    pe_from_resolution,
+    pe_tracks_resolution,
+)
 
 
-def test_normalize_hw_square_int_alias() -> None:
-    assert normalize_hw(560, field="resolution") == (560, 560)
+def test_expand_square_hw() -> None:
+    assert expand_square_hw(560, field="resolution") == (560, 560)
 
 
-def test_normalize_hw_rectangular_pair() -> None:
-    assert normalize_hw((720, 960), field="resolution") == (720, 960)
-
-
-def test_normalize_hw_rejects_bool() -> None:
+def test_expand_square_hw_rejects_bool() -> None:
     with pytest.raises(ValueError, match="resolution"):
-        normalize_hw(True, field="resolution")
+        expand_square_hw(True, field="resolution")
 
 
-def test_normalize_hw_rejects_bad_length() -> None:
+def test_parse_hw_pair_rectangular() -> None:
+    assert parse_hw_pair((720, 960), field="resolution") == (720, 960)
+
+
+def test_parse_hw_pair_rejects_bad_length() -> None:
     with pytest.raises(ValueError, match="length"):
-        normalize_hw((640,), field="resolution")
+        parse_hw_pair((640,), field="resolution")
+
+
+def test_coerce_hw_input_int_and_pair() -> None:
+    assert coerce_hw_input(560, field="resolution") == (560, 560)
+    assert coerce_hw_input((720, 960), field="resolution") == (720, 960)
 
 
 def test_pe_from_resolution_rectangular() -> None:

@@ -25,7 +25,7 @@ def test_keypoint_config_defaults() -> None:
     assert model.dual_projector is True
     assert model.dual_projector_kp_only is True
     assert model.num_keypoints_per_class == [17]
-    assert model.positional_encoding_size == 576 // 12
+    assert model.positional_encoding_size == (576 // 12, 576 // 12)
 
     assert train.keypoint_l1_loss_coef == pytest.approx(1.0)
     assert train.keypoint_findable_loss_coef == pytest.approx(1.0)
@@ -44,7 +44,7 @@ def test_keypoint_preview_config_person_schema() -> None:
     assert model.num_windows == 2
     assert model.dec_layers == 4
     assert model.patch_size == 12
-    assert model.resolution == 576
+    assert model.resolution == (576, 576)
     assert model.pretrain_weights == "rf-detr-keypoint-preview-xlarge.pth"
 
 
