@@ -13,7 +13,7 @@ import torch
 
 from rfdetr.models.ops.functions import ms_deform_attn_core_pytorch
 from rfdetr.models.ops.modules.ms_deform_attn import MSDeformAttn
-from rfdetr.models.transformer import gen_encoder_output_proposals, gen_sineembed_for_position
+from rfdetr.models.transformer import Transformer, gen_encoder_output_proposals, gen_sineembed_for_position
 
 
 @pytest.fixture(autouse=True)
@@ -339,6 +339,381 @@ class TestMSDeformAttnModule:
         module.export()
 
         assert module._export
+
+
+class TestMSDeformAttnRank5ExportPath:
+    """Phase 1 CoreML / torch.export guards: export mode must keep sampling_locations ≤ rank 5.
+
+    CoreML's MIL backend rejects rank-6 tensors. The eager path still uses rank-6
+    ``(B, Q, heads, levels, points, 2)``; export mode merges ``(levels, points)`` into a
+    single axis so every intermediate is ≤ rank 5, and the core must accept both layouts
+    with identical numerics.
+    """
+
+    _d_model = 32
+    _n_heads = 4
+    _n_levels = 2
+    _n_points = 2
+    _hw_pairs: list[tuple[int, int]] = [(4, 4), (2, 2)]
+
+    def _make_module_inputs(
+        self,
+        *,
+        reference_last_dim: int,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        list[tuple[int, int]],
+    ]:
+        """Build MSDeformAttn inputs with 2- or 4-dim reference points.
+
+        Args:
+            reference_last_dim: ``2`` for points or ``4`` for boxes (xywh).
+
+        Returns:
+            Tuple of (query, reference_points, input_flatten, spatial_shapes,
+            level_start_index, hw_pairs).
+        """
+        if reference_last_dim not in (2, 4):
+            raise ValueError(f"reference_last_dim must be 2 or 4, got {reference_last_dim!r}")
+        hw_pairs = self._hw_pairs
+        total_len = sum(ht * wd for ht, wd in hw_pairs)
+        bsz, len_q = 1, 3
+
+        query = torch.randn(bsz, len_q, self._d_model)
+        reference_points = torch.rand(bsz, len_q, self._n_levels, reference_last_dim)
+        input_flatten = torch.randn(bsz, total_len, self._d_model)
+        input_spatial_shapes = torch.tensor(hw_pairs, dtype=torch.long)
+        starts = [sum(ht * wd for ht, wd in hw_pairs[:idx]) for idx in range(self._n_levels)]
+        input_level_start_index = torch.tensor(starts, dtype=torch.long)
+        return query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, hw_pairs
+
+    @pytest.mark.parametrize(
+        "reference_last_dim",
+        [
+            pytest.param(2, id="ref_points"),
+            pytest.param(4, id="ref_boxes"),
+        ],
+    )
+    def test_export_mode_passes_rank5_sampling_locations(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        reference_last_dim: int,
+    ) -> None:
+        """Export-mode forward must call the core with sampling_locations.ndim <= 5."""
+        from rfdetr.models.ops.modules import ms_deform_attn as ms_deform_attn_mod
+
+        captured_ndims: list[int] = []
+        real_core = ms_deform_attn_core_pytorch
+
+        def _capturing_core(
+            value: torch.Tensor,
+            value_spatial_shapes: torch.Tensor,
+            sampling_locations: torch.Tensor,
+            attention_weights: torch.Tensor,
+            value_spatial_shapes_hw: list[tuple[int, int]] | None = None,
+        ) -> torch.Tensor:
+            captured_ndims.append(sampling_locations.ndim)
+            return real_core(
+                value,
+                value_spatial_shapes,
+                sampling_locations,
+                attention_weights,
+                value_spatial_shapes_hw=value_spatial_shapes_hw,
+            )
+
+        monkeypatch.setattr(ms_deform_attn_mod, "ms_deform_attn_core_pytorch", _capturing_core)
+
+        module = MSDeformAttn(
+            d_model=self._d_model,
+            n_levels=self._n_levels,
+            n_heads=self._n_heads,
+            n_points=self._n_points,
+        )
+        module.export()
+        query, ref_pts, input_flatten, spatial_shapes, level_start_index, hw_pairs = self._make_module_inputs(
+            reference_last_dim=reference_last_dim
+        )
+
+        module(
+            query,
+            ref_pts,
+            input_flatten,
+            spatial_shapes,
+            level_start_index,
+            input_spatial_shapes_hw=hw_pairs,
+        )
+
+        assert captured_ndims, "core was not called"
+        assert all(ndim <= 5 for ndim in captured_ndims), (
+            f"export mode must keep sampling_locations rank <= 5 for CoreML, got ndims={captured_ndims}"
+        )
+
+    @pytest.mark.parametrize(
+        "reference_last_dim",
+        [
+            pytest.param(2, id="ref_points"),
+            pytest.param(4, id="ref_boxes"),
+        ],
+    )
+    def test_export_mode_matches_eager_numerically(self, reference_last_dim: int) -> None:
+        """Export-mode (rank-5) output must match eager (rank-6) for the same weights and inputs."""
+        module = MSDeformAttn(
+            d_model=self._d_model,
+            n_levels=self._n_levels,
+            n_heads=self._n_heads,
+            n_points=self._n_points,
+        )
+        module.eval()
+        query, ref_pts, input_flatten, spatial_shapes, level_start_index, hw_pairs = self._make_module_inputs(
+            reference_last_dim=reference_last_dim
+        )
+
+        with torch.no_grad():
+            eager_out = module(
+                query,
+                ref_pts,
+                input_flatten,
+                spatial_shapes,
+                level_start_index,
+                input_spatial_shapes_hw=hw_pairs,
+            )
+            module.export()
+            export_out = module(
+                query,
+                ref_pts,
+                input_flatten,
+                spatial_shapes,
+                level_start_index,
+                input_spatial_shapes_hw=hw_pairs,
+            )
+
+        torch.testing.assert_close(export_out, eager_out, rtol=1e-5, atol=1e-5)
+
+    def test_core_rank5_sampling_locations_match_rank6(self) -> None:
+        """ms_deform_attn_core_pytorch must accept merged rank-5 locations with rank-6 parity."""
+        levels: list[tuple[int, int]] = [(4, 4), (2, 2)]
+        bsz, n_heads, head_dim, len_q, npts = 1, 2, 4, 3, 2
+        nlvl = len(levels)
+        total_hw = sum(ht * wd for ht, wd in levels)
+
+        value = torch.randn(bsz, n_heads, head_dim, total_hw)
+        spatial_shapes = torch.tensor(levels, dtype=torch.long)
+        sampling_locations_rank6 = torch.rand(bsz, len_q, n_heads, nlvl, npts, 2)
+        # Merge (levels, points) in the same order as the export-mode view: levels slow, points fast.
+        sampling_locations_rank5 = sampling_locations_rank6.flatten(3, 4)
+        attention_weights = torch.softmax(torch.randn(bsz, len_q, n_heads, nlvl * npts), dim=-1)
+
+        out_rank6 = ms_deform_attn_core_pytorch(
+            value,
+            spatial_shapes,
+            sampling_locations_rank6,
+            attention_weights,
+            value_spatial_shapes_hw=levels,
+        )
+        out_rank5 = ms_deform_attn_core_pytorch(
+            value,
+            spatial_shapes,
+            sampling_locations_rank5,
+            attention_weights,
+            value_spatial_shapes_hw=levels,
+        )
+
+        torch.testing.assert_close(out_rank5, out_rank6, rtol=1e-5, atol=1e-5)
+
+    def test_eager_mode_still_uses_rank6_sampling_locations(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Eager path should keep the historical rank-6 layout (train/infer unchanged)."""
+        from rfdetr.models.ops.modules import ms_deform_attn as ms_deform_attn_mod
+
+        captured_ndims: list[int] = []
+        real_core = ms_deform_attn_core_pytorch
+
+        def _capturing_core(
+            value: torch.Tensor,
+            value_spatial_shapes: torch.Tensor,
+            sampling_locations: torch.Tensor,
+            attention_weights: torch.Tensor,
+            value_spatial_shapes_hw: list[tuple[int, int]] | None = None,
+        ) -> torch.Tensor:
+            captured_ndims.append(sampling_locations.ndim)
+            return real_core(
+                value,
+                value_spatial_shapes,
+                sampling_locations,
+                attention_weights,
+                value_spatial_shapes_hw=value_spatial_shapes_hw,
+            )
+
+        monkeypatch.setattr(ms_deform_attn_mod, "ms_deform_attn_core_pytorch", _capturing_core)
+
+        module = MSDeformAttn(
+            d_model=self._d_model,
+            n_levels=self._n_levels,
+            n_heads=self._n_heads,
+            n_points=self._n_points,
+        )
+        query, ref_pts, input_flatten, spatial_shapes, level_start_index, hw_pairs = self._make_module_inputs(
+            reference_last_dim=2
+        )
+
+        module(
+            query,
+            ref_pts,
+            input_flatten,
+            spatial_shapes,
+            level_start_index,
+            input_spatial_shapes_hw=hw_pairs,
+        )
+
+        assert captured_ndims == [6], f"eager path should use rank-6 sampling_locations, got {captured_ndims}"
+
+
+class TestTransformerSpatialShapesHwThreading:
+    """Phase 1: Transformer must thread Python (H, W) pairs into MSDeformAttn.
+
+    ``torch.export`` / CoreML need concrete Python ints for split/view sizes inside
+    deformable attention. The Transformer already builds ``spatial_shapes_hw`` for
+    proposals; these tests require that list to reach ``MSDeformAttn.forward`` via the
+    decoder, and that ``torch.compiler.is_exporting()`` builds ``spatial_shapes`` from
+    those pairs instead of ``torch._shape_as_tensor``.
+    """
+
+    _d_model = 16
+    _num_queries = 6
+    _hw_pairs: list[tuple[int, int]] = [(4, 4), (2, 2)]
+
+    def _build_transformer(self) -> Transformer:
+        """Build a tiny eval-mode Transformer with two feature levels."""
+        return Transformer(
+            d_model=self._d_model,
+            num_queries=self._num_queries,
+            num_decoder_layers=1,
+            sa_nhead=4,
+            ca_nhead=4,
+            num_feature_levels=2,
+            dec_n_points=1,
+            return_intermediate_dec=True,
+            lite_refpoint_refine=True,
+            use_grouppose_keypoints=False,
+            two_stage=False,
+        ).eval()
+
+    def _build_inputs(
+        self,
+        batch_size: int = 1,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor]:
+        """Build multi-scale inputs matching ``_hw_pairs``.
+
+        Args:
+            batch_size: Mini-batch size.
+
+        Returns:
+            ``srcs``, ``masks``, ``pos_embeds``, ``refpoint_embed``, ``query_feat``.
+        """
+        srcs = [
+            torch.randn(batch_size, self._d_model, height, width) for height, width in self._hw_pairs
+        ]
+        masks = [torch.zeros(batch_size, height, width, dtype=torch.bool) for height, width in self._hw_pairs]
+        pos_embeds = [
+            torch.randn(batch_size, self._d_model, height, width) for height, width in self._hw_pairs
+        ]
+        refpoint_embed = torch.rand(self._num_queries, 4)
+        query_feat = torch.randn(self._num_queries, self._d_model)
+        return srcs, masks, pos_embeds, refpoint_embed, query_feat
+
+    def test_forwards_spatial_shapes_hw_to_ms_deform_attn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Transformer.forward must pass ``input_spatial_shapes_hw`` into every MSDeformAttn call."""
+        transformer = self._build_transformer()
+        captured_hw: list[list[tuple[int, int]] | None] = []
+        real_forward = MSDeformAttn.forward
+
+        def _capturing_forward(
+            self: MSDeformAttn,
+            query: torch.Tensor,
+            reference_points: torch.Tensor,
+            input_flatten: torch.Tensor,
+            input_spatial_shapes: torch.Tensor,
+            input_level_start_index: torch.Tensor,
+            input_padding_mask: torch.Tensor | None = None,
+            input_spatial_shapes_hw: list[tuple[int, int]] | None = None,
+        ) -> torch.Tensor:
+            captured_hw.append(input_spatial_shapes_hw)
+            return real_forward(
+                self,
+                query,
+                reference_points,
+                input_flatten,
+                input_spatial_shapes,
+                input_level_start_index,
+                input_padding_mask,
+                input_spatial_shapes_hw,
+            )
+
+        monkeypatch.setattr(MSDeformAttn, "forward", _capturing_forward)
+
+        srcs, masks, pos_embeds, refpoint_embed, query_feat = self._build_inputs()
+        with torch.no_grad():
+            transformer(srcs, masks, pos_embeds, refpoint_embed, query_feat)
+
+        assert captured_hw, "MSDeformAttn.forward was not called"
+        for hw in captured_hw:
+            assert hw == self._hw_pairs, f"expected spatial_shapes_hw={self._hw_pairs!r}, got {hw!r}"
+
+    def test_spatial_shapes_uses_hw_pairs_under_torch_export(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Under ``torch.compiler.is_exporting()``, spatial_shapes must come from Python hw pairs."""
+        transformer = self._build_transformer()
+        as_tensor_calls: list[object] = []
+        shape_as_tensor_calls: list[object] = []
+
+        real_as_tensor = torch.as_tensor
+        real_shape_as_tensor = torch._shape_as_tensor
+
+        def _tracking_as_tensor(*args: object, **kwargs: object) -> torch.Tensor:
+            as_tensor_calls.append(args[0] if args else None)
+            return real_as_tensor(*args, **kwargs)
+
+        def _tracking_shape_as_tensor(*args: object, **kwargs: object) -> torch.Tensor:
+            shape_as_tensor_calls.append(args[0] if args else None)
+            return real_shape_as_tensor(*args, **kwargs)
+
+        monkeypatch.setattr(torch.compiler, "is_exporting", lambda: True)
+        monkeypatch.setattr(torch, "as_tensor", _tracking_as_tensor)
+        monkeypatch.setattr(torch, "_shape_as_tensor", _tracking_shape_as_tensor)
+
+        srcs, masks, pos_embeds, refpoint_embed, query_feat = self._build_inputs()
+        with torch.no_grad():
+            transformer(srcs, masks, pos_embeds, refpoint_embed, query_feat)
+
+        assert self._hw_pairs in as_tensor_calls, (
+            f"expected torch.as_tensor({self._hw_pairs!r}) under is_exporting(), got calls={as_tensor_calls!r}"
+        )
+        assert shape_as_tensor_calls == [], (
+            f"_shape_as_tensor must not run under is_exporting(), got {shape_as_tensor_calls!r}"
+        )
+
+    def test_eager_path_still_uses_shape_as_tensor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Eager / ONNX-TensorRT path must keep ``torch._shape_as_tensor`` (symbolic H/W)."""
+        transformer = self._build_transformer()
+        shape_as_tensor_calls: list[object] = []
+        real_shape_as_tensor = torch._shape_as_tensor
+
+        def _tracking_shape_as_tensor(*args: object, **kwargs: object) -> torch.Tensor:
+            shape_as_tensor_calls.append(args[0] if args else None)
+            return real_shape_as_tensor(*args, **kwargs)
+
+        monkeypatch.setattr(torch.compiler, "is_exporting", lambda: False)
+        monkeypatch.setattr(torch, "_shape_as_tensor", _tracking_shape_as_tensor)
+
+        srcs, masks, pos_embeds, refpoint_embed, query_feat = self._build_inputs()
+        with torch.no_grad():
+            transformer(srcs, masks, pos_embeds, refpoint_embed, query_feat)
+
+        assert len(shape_as_tensor_calls) == len(self._hw_pairs), (
+            f"eager path should call _shape_as_tensor once per level, got {len(shape_as_tensor_calls)}"
+        )
 
 
 class TestGenEncoderOutputProposalsDynamicBatch:
