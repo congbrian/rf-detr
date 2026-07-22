@@ -504,6 +504,56 @@ class TestMSDeformAttnRank5ExportPath:
 
         torch.testing.assert_close(export_out, eager_out, rtol=1e-5, atol=1e-5)
 
+    @pytest.mark.parametrize(
+        "reference_last_dim",
+        [
+            pytest.param(2, id="ref_points"),
+            pytest.param(4, id="ref_boxes"),
+        ],
+    )
+    def test_export_mode_broadcasts_singleton_level_dim(self, reference_last_dim: int) -> None:
+        """Export path must accept ``reference_points`` with level dim 1 (decoder export shape).
+
+        ``TransformerDecoder`` in export mode builds ``refpoints_input`` as ``(B, Q, 1, 4)``.
+        The eager rank-6 path broadcasts that singleton over ``n_levels``; the rank-5 path must
+        expand before ``repeat_interleave`` so it stays compatible when ``n_levels > 1``.
+        """
+        module = MSDeformAttn(
+            d_model=self._d_model,
+            n_levels=self._n_levels,
+            n_heads=self._n_heads,
+            n_points=self._n_points,
+        )
+        module.eval()
+        query, ref_pts_full, input_flatten, spatial_shapes, level_start_index, hw_pairs = self._make_module_inputs(
+            reference_last_dim=reference_last_dim
+        )
+        # Decoder export shape: one shared ref box/point broadcast across feature levels.
+        ref_pts = ref_pts_full[:, :, :1, :].contiguous()
+        assert ref_pts.shape[2] == 1
+        assert self._n_levels > 1
+
+        with torch.no_grad():
+            eager_out = module(
+                query,
+                ref_pts,
+                input_flatten,
+                spatial_shapes,
+                level_start_index,
+                input_spatial_shapes_hw=hw_pairs,
+            )
+            module.export()
+            export_out = module(
+                query,
+                ref_pts,
+                input_flatten,
+                spatial_shapes,
+                level_start_index,
+                input_spatial_shapes_hw=hw_pairs,
+            )
+
+        torch.testing.assert_close(export_out, eager_out, rtol=1e-5, atol=1e-5)
+
     def test_core_rank5_sampling_locations_match_rank6(self) -> None:
         """ms_deform_attn_core_pytorch must accept merged rank-5 locations with rank-6 parity."""
         levels: list[tuple[int, int]] = [(4, 4), (2, 2)]

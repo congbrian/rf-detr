@@ -142,7 +142,8 @@ class MSDeformAttn(nn.Module):
             RuntimeError: If ``self._export`` is True and ``input_spatial_shapes_hw`` is
                 ``None`` (tensor-derived length produces unbacked symbolic ints under
                 ``torch.export``).
-            ValueError: If the last dimension of ``reference_points`` is not 2 or 4.
+            ValueError: If the last dimension of ``reference_points`` is not 2 or 4, or (in
+                export mode) if the level dimension is neither 1 nor ``n_levels``.
         """
         if self._export and input_spatial_shapes_hw is None:
             raise RuntimeError(
@@ -182,9 +183,21 @@ class MSDeformAttn(nn.Module):
             # below (offset_normalizer / reference_points are repeat_interleaved over n_points to
             # match the [n_levels, n_points] flattening order). The core consumes the rank-5 form
             # (detected by ndim). Only reached in export mode, so eager train/inference is unchanged.
+            #
+            # Decoder export mode passes reference_points with level dim 1 (shared across levels);
+            # the rank-6 path broadcasts via None dims. Expand here before repeat_interleave so the
+            # merged axis length is n_levels*n_points, not n_points.
             sampling_offsets = self.sampling_offsets(query).view(
                 batch_size, len_query, self.n_heads, self.n_levels * self.n_points, 2
             )
+            n_ref_levels = reference_points.shape[2]
+            if n_ref_levels == 1:
+                reference_points = reference_points.expand(-1, -1, self.n_levels, -1)
+            elif n_ref_levels != self.n_levels:
+                raise ValueError(
+                    f"reference_points level dim must be 1 or n_levels={self.n_levels}, "
+                    f"got {n_ref_levels}"
+                )
             if reference_points.shape[-1] == 2:
                 offset_normalizer = torch.stack([input_spatial_shapes[..., 1], input_spatial_shapes[..., 0]], -1)
                 offset_normalizer = offset_normalizer.repeat_interleave(self.n_points, dim=0)
