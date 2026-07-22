@@ -340,6 +340,17 @@ class TestMSDeformAttnModule:
 
         assert module._export
 
+    def test_export_mode_requires_spatial_shapes_hw(self) -> None:
+        """Export mode without ``input_spatial_shapes_hw`` must raise a clear RuntimeError."""
+        module = MSDeformAttn(
+            d_model=self._d_model, n_levels=self._n_levels, n_heads=self._n_heads, n_points=self._n_points
+        )
+        module.export()
+        query, ref_pts, input_flatten, spatial_shapes, level_start_index, _ = self._make_module_inputs()
+
+        with pytest.raises(RuntimeError, match="input_spatial_shapes_hw"):
+            module(query, ref_pts, input_flatten, spatial_shapes, level_start_index)
+
 
 class TestMSDeformAttnRank5ExportPath:
     """Phase 1 CoreML / torch.export guards: export mode must keep sampling_locations ≤ rank 5.

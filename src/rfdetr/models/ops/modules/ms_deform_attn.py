@@ -137,7 +137,20 @@ class MSDeformAttn(nn.Module):
 
         Returns:
             Output tensor of shape (N, Length_{query}, C).
+
+        Raises:
+            RuntimeError: If ``self._export`` is True and ``input_spatial_shapes_hw`` is
+                ``None`` (tensor-derived length produces unbacked symbolic ints under
+                ``torch.export``).
+            ValueError: If the last dimension of ``reference_points`` is not 2 or 4.
         """
+        if self._export and input_spatial_shapes_hw is None:
+            raise RuntimeError(
+                "MSDeformAttn export mode requires input_spatial_shapes_hw; got None. "
+                "Pass concrete Python-int (H, W) pairs so expected input length is not "
+                "derived from tensor values (which creates unbacked symbolic ints under "
+                "torch.export)."
+            )
         batch_size, len_query, _ = query.shape
         batch_size, len_input, _ = input_flatten.shape
         # When Python int (H, W) pairs are available, derive the expected length from them so the

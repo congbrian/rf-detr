@@ -36,6 +36,15 @@ def _safe_multinormalize(dim: int) -> int:
     return max(1, dim)
 
 
+def _not_exporting() -> bool:
+    """Return True outside ``torch.export`` tracing.
+
+    ``torch.compiler.is_exporting`` exists only on torch>=2.6; older builds never run
+    export tracing, so a missing attribute is treated as not exporting.
+    """
+    return not getattr(torch.compiler, "is_exporting", lambda: False)()
+
+
 def gen_sineembed_for_position(pos_tensor: Tensor, dim: int = 128) -> Tensor:
     # n_query, bs, _ = pos_tensor.size()
     # sineembed_tensor = torch.zeros(n_query, bs, 256)
@@ -312,13 +321,12 @@ class Transformer(nn.Module):
         # "the tensor has a non-zero number of elements, but its data is not allocated yet".
         # Under that trace build spatial_shapes from the concrete Python-int (H, W) pairs
         # instead; those exporters use static shapes, so the baked constant is exact.
-        # getattr guards torch<2.6, which lacks is_exporting() and never runs torch.export.
-        if getattr(torch.compiler, "is_exporting", lambda: False)():
-            spatial_shapes = torch.as_tensor(spatial_shapes_hw, device=srcs[0].device, dtype=torch.long)
-        else:
+        if _not_exporting():
             spatial_shapes = torch.stack([torch._shape_as_tensor(src)[2:4] for src in srcs]).to(
                 device=srcs[0].device, dtype=torch.long
             )
+        else:
+            spatial_shapes = torch.as_tensor(spatial_shapes_hw, device=srcs[0].device, dtype=torch.long)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
 
         # Flatten optional dual-projector features for keypoint-specific cross-attention.
